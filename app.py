@@ -79,6 +79,31 @@ def get_monthly_sheets_filtered(all_sheets):
     }
 
 
+def add_serial_number(df):
+    display_df = df.reset_index(drop=True).copy()
+    display_df.insert(0, "S. No.", [str(i) for i in range(1, len(display_df) + 1)])
+    return display_df
+
+
+def prepare_display_table(df, left_align_packet_count=False):
+    display_df = add_serial_number(df)
+    if left_align_packet_count and "Packet Count" in display_df.columns:
+        display_df["Packet Count"] = display_df["Packet Count"].astype(str)
+    return display_df
+
+
+def get_table_column_config(left_align_packet_count=False):
+    column_config = {
+        "S. No.": st.column_config.TextColumn(
+            "S. No.",
+            width="small",
+        )
+    }
+    if left_align_packet_count:
+        column_config["Packet Count"] = st.column_config.TextColumn("Packet Count")
+    return column_config
+
+
 def get_date_wise_packet_count(sheet_name, monthly_sheets_filtered):
     df = monthly_sheets_filtered[sheet_name].copy()
 
@@ -126,6 +151,8 @@ def get_packets_booked_per_sender(sheet_name, monthly_sheets_filtered):
         sender_col = "BILLING DETAILS"
     else:
         return pd.DataFrame()
+
+    df[sender_col] = df[sender_col].astype(str).str.strip()
 
     result = (
         df.groupby(sender_col)["AWB NO."]
@@ -200,31 +227,75 @@ def get_payment_received_per_month(sheet_name, monthly_sheets_filtered):
     df["CREDIT OR CASH"] = df["CREDIT OR CASH"].astype(str).str.upper().str.strip()
     df["AMOUNT"] = df["AMOUNT"].astype(str).str.strip()
     df["AMOUNT_NUM"] = pd.to_numeric(df["AMOUNT"], errors="coerce")
-
-    cash_total = df[df["CREDIT OR CASH"] == "CASH"]["AMOUNT_NUM"].sum()
-    upi_total = df[df["CREDIT OR CASH"] == "UPI"]["AMOUNT_NUM"].sum()
-
-    credit_numeric = df[df["CREDIT OR CASH"] == "CREDIT"]
-    credit_total = credit_numeric["AMOUNT_NUM"].sum()
-
-    credit_monthly = df[
-        (df["CREDIT OR CASH"] == "CREDIT") &
-        (df["AMOUNT"].str.lower() == "monthly")
+    df["SENDER NAME"] = df["SENDER NAME"].astype(str).str.strip()
+    df = df[
+        (df["SENDER NAME"] != "") &
+        (df["SENDER NAME"].str.lower() != "nan")
     ]
 
-    monthly_sender_count = (
-        credit_monthly.groupby("SENDER NAME")["AMOUNT"]
-        .count()
-        .reset_index(name="Monthly Count")
-        .sort_values("Monthly Count", ascending=False)
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "SENDER NAME",
+                "CASH AMOUNT",
+                "UPI AMOUNT",
+                "CREDIT AMOUNT",
+                "CREDIT COUNT",
+            ]
+        )
+
+    all_senders = pd.DataFrame({
+        "SENDER NAME": sorted(df["SENDER NAME"].unique())
+    })
+
+    cash_amount = (
+        df[df["CREDIT OR CASH"] == "CASH"]
+        .groupby("SENDER NAME")["AMOUNT_NUM"]
+        .sum()
+        .reset_index(name="CASH AMOUNT")
     )
 
-    return {
-        "cash_total": int(cash_total) if pd.notna(cash_total) else 0,
-        "upi_total": int(upi_total) if pd.notna(upi_total) else 0,
-        "credit_total": int(credit_total) if pd.notna(credit_total) else 0,
-        "monthly_sender_count": monthly_sender_count,
-    }
+    upi_amount = (
+        df[df["CREDIT OR CASH"] == "UPI"]
+        .groupby("SENDER NAME")["AMOUNT_NUM"]
+        .sum()
+        .reset_index(name="UPI AMOUNT")
+    )
+
+    credit_amount = (
+        df[df["CREDIT OR CASH"] == "CREDIT"]
+        .groupby("SENDER NAME")["AMOUNT_NUM"]
+        .sum()
+        .reset_index(name="CREDIT AMOUNT")
+    )
+
+    credit_count = (
+        df[
+            (df["CREDIT OR CASH"] == "CREDIT") &
+            (df["AMOUNT"].str.lower() == "monthly")
+        ]
+        .groupby("SENDER NAME")["AMOUNT"]
+        .count()
+        .reset_index(name="CREDIT COUNT")
+    )
+
+    result = (
+        all_senders
+        .merge(cash_amount, on="SENDER NAME", how="left")
+        .merge(upi_amount, on="SENDER NAME", how="left")
+        .merge(credit_amount, on="SENDER NAME", how="left")
+        .merge(credit_count, on="SENDER NAME", how="left")
+        .fillna(0)
+    )
+
+    for col in ["CASH AMOUNT", "UPI AMOUNT", "CREDIT AMOUNT"]:
+        result[col] = result[col].apply(
+            lambda value: int(value) if float(value).is_integer() else round(float(value), 2)
+        )
+
+    result["CREDIT COUNT"] = result["CREDIT COUNT"].astype(int)
+
+    return result
 
 
 if "monthly_sheets_filtered" not in st.session_state:
@@ -274,8 +345,8 @@ if st.session_state.monthly_sheets_filtered:
 if st.session_state.confirmed_month:
     report_options = [
         "date wise packet count",
-        "packets booked per sender",
-        "packets booked per mode",
+        "month-wise packets booked per sender",
+        "month-wise packets booked per mode",
         "payment received per month",
     ]
 
@@ -297,10 +368,12 @@ if st.session_state.confirmed_month and st.session_state.confirmed_report:
             st.warning("Required columns were not found for this report.")
         else:
             sender_date_result = get_sender_wise_packets_for_each_date(month_name, monthly_sheets_filtered)
+            display_result = prepare_display_table(result, left_align_packet_count=True)
             event = st.dataframe(
-                result,
+                display_result,
                 use_container_width=True,
                 hide_index=True,
+                column_config=get_table_column_config(left_align_packet_count=True),
                 on_select="rerun",
                 selection_mode="single-row",
                 key="date_wise_table",
@@ -315,29 +388,40 @@ if st.session_state.confirmed_month and st.session_state.confirmed_report:
 
                     st.write(f"Sender-wise packet count for {selected_date}")
                     st.dataframe(
-                        day_result[["SENDER NAME", "Packet Count"]],
+                        prepare_display_table(day_result[["SENDER NAME", "Packet Count"]], left_align_packet_count=True),
                         use_container_width=True,
                         hide_index=True,
+                        column_config=get_table_column_config(left_align_packet_count=True),
                     )
                 else:
                     st.caption("Click a date row in the table to see sender-wise packet count for that day.")
 
-    elif report_name == "packets booked per sender":
+    elif report_name == "month-wise packets booked per sender":
         st.subheader("Packets Booked Per Sender")
         result = get_packets_booked_per_sender(month_name, monthly_sheets_filtered)
         if result.empty:
             st.warning("Required columns were not found for this report.")
         else:
-            st.metric("Total Packets Booked", int(result["Packet Count"].sum()))
-            st.dataframe(result, use_container_width=True)
+            st.metric("Total Packets Booked This Month", int(result["Packet Count"].sum()))
+            st.dataframe(
+                prepare_display_table(result, left_align_packet_count=True),
+                use_container_width=True,
+                hide_index=True,
+                column_config=get_table_column_config(left_align_packet_count=True),
+            )
 
-    elif report_name == "packets booked per mode":
+    elif report_name == "month-wise packets booked per mode":
         st.subheader("Packets Booked Per Mode")
         result = get_packets_booked_per_mode(month_name, monthly_sheets_filtered)
         if result.empty:
             st.warning("Required columns were not found for this report.")
         else:
-            st.dataframe(result, use_container_width=True)
+            st.dataframe(
+                prepare_display_table(result, left_align_packet_count=True),
+                use_container_width=True,
+                hide_index=True,
+                column_config=get_table_column_config(left_align_packet_count=True),
+            )
 
     elif report_name == "payment received per month":
         st.subheader("Payment Received Per Month")
@@ -345,14 +429,23 @@ if st.session_state.confirmed_month and st.session_state.confirmed_report:
 
         if result is None:
             st.warning("Required columns were not found for this report.")
+        elif result.empty:
+            st.info("No sender-wise payment data found.")
         else:
-            col1, col2, col3 = st.columns(3)
-            col1.metric("Cash Booking", f"Rs {result['cash_total']}")
-            col2.metric("UPI Booking", f"Rs {result['upi_total']}")
-            col3.metric("Credit Booking", f"Rs {result['credit_total']}")
+            total_cash = result["CASH AMOUNT"].sum()
+            total_upi = result["UPI AMOUNT"].sum()
+            total_credit_amount = result["CREDIT AMOUNT"].sum()
+            total_credit_count = int(result["CREDIT COUNT"].sum())
 
-            st.write("Monthly Credit (per Sender)")
-            if result["monthly_sender_count"].empty:
-                st.info("No monthly credit entries")
-            else:
-                st.dataframe(result["monthly_sender_count"], use_container_width=True)
+            col1, col2, col3, col4 = st.columns(4)
+            col1.metric("Total Cash", total_cash)
+            col2.metric("Total UPI", total_upi)
+            col3.metric("Total Credit", total_credit_amount)
+            col4.metric("Credit Count", total_credit_count)
+
+            st.dataframe(
+                prepare_display_table(result),
+                use_container_width=True,
+                hide_index=True,
+                column_config=get_table_column_config(),
+            )

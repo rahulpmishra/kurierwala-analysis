@@ -265,6 +265,7 @@ if st.session_state.confirmed_month and st.session_state.confirmed_report:
         if result.empty:
             st.warning("Required columns were not found for this report.")
         else:
+            st.metric("Total Packets Booked", int(result["Packet Count"].sum()))
             st.dataframe(result, use_container_width=True)
 
     elif report_name == "packets booked per sender":

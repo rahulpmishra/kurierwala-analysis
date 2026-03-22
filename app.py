@@ -102,7 +102,7 @@ def get_date_wise_packet_count(sheet_name, monthly_sheets_filtered):
         df.groupby("DATE")["AWB NO."]
         .count()
         .reset_index(name="Packet Count")
-        .sort_values("Packet Count", ascending=False)
+        .sort_values("DATE", ascending=True)
     )
 
     result["DATE"] = result["DATE"].dt.date
@@ -135,6 +135,37 @@ def get_packets_booked_per_sender(sheet_name, monthly_sheets_filtered):
     )
 
     return result.rename(columns={sender_col: "SENDER NAME"})
+
+
+def get_sender_wise_packets_for_each_date(sheet_name, monthly_sheets_filtered):
+    df = monthly_sheets_filtered[sheet_name].copy()
+
+    df.columns = df.columns.astype(str).str.strip().str.upper()
+    df = df.loc[:, ~df.columns.duplicated()]
+
+    if "DATE" in df.columns:
+        date_col = "DATE"
+    elif "AHU" in df.columns:
+        date_col = "AHU"
+    else:
+        date_col = df.columns[0]
+
+    df["DATE"] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    df = df[df["DATE"].notna()]
+
+    required_cols = ["DATE", "SENDER NAME", "AWB NO."]
+    if not all(col in df.columns for col in required_cols):
+        return pd.DataFrame()
+
+    result = (
+        df.groupby(["DATE", "SENDER NAME"])["AWB NO."]
+        .count()
+        .reset_index(name="Packet Count")
+        .sort_values(["DATE", "Packet Count", "SENDER NAME"], ascending=[True, False, True])
+    )
+
+    result["DATE"] = result["DATE"].dt.date
+    return result
 
 
 def get_packets_booked_per_mode(sheet_name, monthly_sheets_filtered):
@@ -265,8 +296,31 @@ if st.session_state.confirmed_month and st.session_state.confirmed_report:
         if result.empty:
             st.warning("Required columns were not found for this report.")
         else:
-            st.metric("Total Packets Booked", int(result["Packet Count"].sum()))
-            st.dataframe(result, use_container_width=True)
+            sender_date_result = get_sender_wise_packets_for_each_date(month_name, monthly_sheets_filtered)
+            event = st.dataframe(
+                result,
+                use_container_width=True,
+                hide_index=True,
+                on_select="rerun",
+                selection_mode="single-row",
+                key="date_wise_table",
+            )
+
+            if not sender_date_result.empty:
+                selected_rows = event.selection.rows
+                if selected_rows:
+                    selected_row = result.iloc[selected_rows[0]]
+                    selected_date = selected_row["DATE"]
+                    day_result = sender_date_result[sender_date_result["DATE"] == selected_date]
+
+                    st.write(f"Sender-wise packet count for {selected_date}")
+                    st.dataframe(
+                        day_result[["SENDER NAME", "Packet Count"]],
+                        use_container_width=True,
+                        hide_index=True,
+                    )
+                else:
+                    st.caption("Click a date row in the table to see sender-wise packet count for that day.")
 
     elif report_name == "packets booked per sender":
         st.subheader("Packets Booked Per Sender")
@@ -274,6 +328,7 @@ if st.session_state.confirmed_month and st.session_state.confirmed_report:
         if result.empty:
             st.warning("Required columns were not found for this report.")
         else:
+            st.metric("Total Packets Booked", int(result["Packet Count"].sum()))
             st.dataframe(result, use_container_width=True)
 
     elif report_name == "packets booked per mode":

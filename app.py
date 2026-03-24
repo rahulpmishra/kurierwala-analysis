@@ -1,8 +1,12 @@
 import io
 import re
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+from urllib.request import Request, urlopen
 
 import pandas as pd
 import streamlit as st
+from openpyxl import load_workbook
 
 
 st.set_page_config(page_title="Kurier Analysis", layout="centered")
@@ -57,19 +61,61 @@ def is_valid_month_year_sheet(name):
     return False
 
 
-def load_all_sheets(excel_url, uploaded_file):
+def get_excel_source(excel_url, uploaded_file):
     if uploaded_file is not None:
-        file_bytes = io.BytesIO(uploaded_file.getvalue())
-        return pd.read_excel(file_bytes, sheet_name=None, engine="openpyxl")
+        return io.BytesIO(uploaded_file.getvalue())
 
     if not excel_url:
         raise ValueError("Please paste a Google Sheet / Excel URL or upload an Excel file.")
 
     excel_source = excel_url.strip()
     if "docs.google.com/spreadsheets" in excel_source and "/edit" in excel_source:
-        excel_source = excel_source.split("/edit")[0] + "/export?format=xlsx"
+        return excel_source.split("/edit")[0] + "/export?format=xlsx"
 
-    return pd.read_excel(excel_source, sheet_name=None, engine="openpyxl")
+    return excel_source
+
+
+def get_workbook_title_from_excel_source(excel_source):
+    try:
+        if isinstance(excel_source, io.BytesIO):
+            workbook = load_workbook(io.BytesIO(excel_source.getvalue()), read_only=True)
+        else:
+            workbook = load_workbook(excel_source, read_only=True)
+
+        title = getattr(workbook.properties, "title", None)
+        return title.strip() if isinstance(title, str) and title.strip() else None
+    except Exception:
+        return None
+
+
+def get_google_sheet_title_from_url(excel_url):
+    if not excel_url or "docs.google.com/spreadsheets" not in excel_url:
+        return None
+
+    page_url = excel_url.strip()
+    if "/export" in page_url:
+        page_url = page_url.split("/export")[0] + "/edit"
+
+    try:
+        request = Request(page_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urlopen(request, timeout=10) as response:
+            html = response.read().decode("utf-8", errors="ignore")
+
+        match = re.search(r"<title>(.*?)</title>", html, re.IGNORECASE | re.DOTALL)
+        if not match:
+            return None
+
+        title = re.sub(r"\s+", " ", match.group(1)).strip()
+        return title.removesuffix(" - Google Sheets").strip()
+    except Exception:
+        return None
+
+
+def load_all_sheets(excel_url, uploaded_file):
+    excel_source = get_excel_source(excel_url, uploaded_file)
+    all_sheets = pd.read_excel(excel_source, sheet_name=None, engine="openpyxl")
+    workbook_title = get_workbook_title_from_excel_source(excel_source)
+    return all_sheets, workbook_title
 
 
 def get_monthly_sheets_filtered(all_sheets):
@@ -77,6 +123,26 @@ def get_monthly_sheets_filtered(all_sheets):
         name: df for name, df in all_sheets.items()
         if is_valid_month_year_sheet(name)
     }
+
+
+def get_spreadsheet_display_name(excel_url, uploaded_file, workbook_title=None):
+    if workbook_title:
+        return workbook_title
+
+    google_sheet_title = get_google_sheet_title_from_url(excel_url)
+    if google_sheet_title:
+        return google_sheet_title
+
+    if uploaded_file is not None:
+        return Path(uploaded_file.name).stem
+
+    if not excel_url:
+        return None
+
+    source = excel_url.strip()
+    parsed_url = urlparse(source)
+    file_name = unquote(parsed_url.path.rstrip("/").split("/")[-1])
+    return Path(file_name).stem if file_name else source
 
 
 def add_serial_number(df):
@@ -448,33 +514,51 @@ if "confirmed_month" not in st.session_state:
 if "confirmed_report" not in st.session_state:
     st.session_state.confirmed_report = None
 
+if "spreadsheet_name" not in st.session_state:
+    st.session_state.spreadsheet_name = None
+
 
 excel_url = st.text_input("Paste Google Sheet / Excel URL")
 uploaded_file = st.file_uploader("Or upload Excel file", type=["xlsx", "xls"])
 
 if st.button("Analyze", key="source_analyze"):
     try:
-        all_sheets = load_all_sheets(excel_url, uploaded_file)
+        all_sheets, workbook_title = load_all_sheets(excel_url, uploaded_file)
         monthly_sheets_filtered = get_monthly_sheets_filtered(all_sheets)
 
         if not monthly_sheets_filtered:
             st.session_state.monthly_sheets_filtered = None
             st.session_state.confirmed_month = None
             st.session_state.confirmed_report = None
+            st.session_state.spreadsheet_name = None
             st.error("No valid month sheets were found in the file.")
         else:
             st.session_state.monthly_sheets_filtered = monthly_sheets_filtered
             st.session_state.confirmed_month = None
             st.session_state.confirmed_report = None
+            st.session_state.spreadsheet_name = get_spreadsheet_display_name(
+                excel_url,
+                uploaded_file,
+                workbook_title=workbook_title,
+            )
             st.success("File analyzed. Select a month below.")
     except Exception as exc:
         st.session_state.monthly_sheets_filtered = None
         st.session_state.confirmed_month = None
         st.session_state.confirmed_report = None
+        st.session_state.spreadsheet_name = None
         st.error(f"Could not read the sheet: {exc}")
 
 
 if st.session_state.monthly_sheets_filtered:
+    if st.session_state.spreadsheet_name:
+        st.markdown(
+            f"<div style='font-size: 1.2rem; font-weight: 600; margin-bottom: 0.5rem;'>"
+            f"Spreadsheet: {st.session_state.spreadsheet_name}"
+            f"</div>",
+            unsafe_allow_html=True,
+        )
+
     month_options = list(st.session_state.monthly_sheets_filtered.keys())
     selected_month = st.selectbox("Select Month", month_options)
 

@@ -85,14 +85,18 @@ def add_serial_number(df):
     return display_df
 
 
-def prepare_display_table(df, left_align_packet_count=False):
+def prepare_display_table(df, left_align_packet_count=False, left_align_payment_columns=False):
     display_df = add_serial_number(df)
     if left_align_packet_count and "Packet Count" in display_df.columns:
         display_df["Packet Count"] = display_df["Packet Count"].astype(str)
+    if left_align_payment_columns:
+        for col in ["CASH AMOUNT", "UPI AMOUNT", "CREDIT AMOUNT", "CREDIT COUNT", "TRANSACTION COUNT"]:
+            if col in display_df.columns:
+                display_df[col] = display_df[col].astype(str)
     return display_df
 
 
-def get_table_column_config(left_align_packet_count=False):
+def get_table_column_config(left_align_packet_count=False, left_align_payment_columns=False):
     column_config = {
         "S. No.": st.column_config.TextColumn(
             "S. No.",
@@ -101,6 +105,12 @@ def get_table_column_config(left_align_packet_count=False):
     }
     if left_align_packet_count:
         column_config["Packet Count"] = st.column_config.TextColumn("Packet Count")
+    if left_align_payment_columns:
+        column_config["CASH AMOUNT"] = st.column_config.TextColumn("CASH AMOUNT")
+        column_config["UPI AMOUNT"] = st.column_config.TextColumn("UPI AMOUNT")
+        column_config["CREDIT AMOUNT"] = st.column_config.TextColumn("CREDIT AMOUNT")
+        column_config["CREDIT COUNT"] = st.column_config.TextColumn("CREDIT COUNT")
+        column_config["TRANSACTION COUNT"] = st.column_config.TextColumn("TRANSACTION COUNT")
     return column_config
 
 
@@ -220,51 +230,57 @@ def get_payment_received_per_month(sheet_name, monthly_sheets_filtered):
     df.columns = df.columns.astype(str).str.strip().str.upper()
     df = df.loc[:, ~df.columns.duplicated()]
 
-    required_cols = ["CREDIT OR CASH", "AMOUNT", "SENDER NAME"]
+    if "DATE" in df.columns:
+        date_col = "DATE"
+    elif "AHU" in df.columns:
+        date_col = "AHU"
+    else:
+        date_col = df.columns[0]
+
+    required_cols = ["CREDIT OR CASH", "AMOUNT"]
     if not all(col in df.columns for col in required_cols):
         return None
 
+    df["DATE"] = pd.to_datetime(df[date_col], errors="coerce", dayfirst=True)
+    df = df[df["DATE"].notna()]
+    df["DATE"] = df["DATE"].dt.normalize()
     df["CREDIT OR CASH"] = df["CREDIT OR CASH"].astype(str).str.upper().str.strip()
     df["AMOUNT"] = df["AMOUNT"].astype(str).str.strip()
     df["AMOUNT_NUM"] = pd.to_numeric(df["AMOUNT"], errors="coerce")
-    df["SENDER NAME"] = df["SENDER NAME"].astype(str).str.strip()
-    df = df[
-        (df["SENDER NAME"] != "") &
-        (df["SENDER NAME"].str.lower() != "nan")
-    ]
 
     if df.empty:
         return pd.DataFrame(
             columns=[
-                "SENDER NAME",
+                "DATE",
                 "CASH AMOUNT",
                 "UPI AMOUNT",
                 "CREDIT AMOUNT",
                 "CREDIT COUNT",
+                "TRANSACTION COUNT",
             ]
         )
 
-    all_senders = pd.DataFrame({
-        "SENDER NAME": sorted(df["SENDER NAME"].unique())
+    all_dates = pd.DataFrame({
+        "DATE": sorted(df["DATE"].unique())
     })
 
     cash_amount = (
         df[df["CREDIT OR CASH"] == "CASH"]
-        .groupby("SENDER NAME")["AMOUNT_NUM"]
+        .groupby("DATE")["AMOUNT_NUM"]
         .sum()
         .reset_index(name="CASH AMOUNT")
     )
 
     upi_amount = (
         df[df["CREDIT OR CASH"] == "UPI"]
-        .groupby("SENDER NAME")["AMOUNT_NUM"]
+        .groupby("DATE")["AMOUNT_NUM"]
         .sum()
         .reset_index(name="UPI AMOUNT")
     )
 
     credit_amount = (
         df[df["CREDIT OR CASH"] == "CREDIT"]
-        .groupby("SENDER NAME")["AMOUNT_NUM"]
+        .groupby("DATE")["AMOUNT_NUM"]
         .sum()
         .reset_index(name="CREDIT AMOUNT")
     )
@@ -274,19 +290,30 @@ def get_payment_received_per_month(sheet_name, monthly_sheets_filtered):
             (df["CREDIT OR CASH"] == "CREDIT") &
             (df["AMOUNT"].str.lower() == "monthly")
         ]
-        .groupby("SENDER NAME")["AMOUNT"]
+        .groupby("DATE")["AMOUNT"]
         .count()
         .reset_index(name="CREDIT COUNT")
     )
 
-    result = (
-        all_senders
-        .merge(cash_amount, on="SENDER NAME", how="left")
-        .merge(upi_amount, on="SENDER NAME", how="left")
-        .merge(credit_amount, on="SENDER NAME", how="left")
-        .merge(credit_count, on="SENDER NAME", how="left")
-        .fillna(0)
+    transaction_count = (
+        df[df["CREDIT OR CASH"].isin(["CASH", "UPI", "CREDIT"])]
+        .groupby("DATE")["CREDIT OR CASH"]
+        .count()
+        .reset_index(name="TRANSACTION COUNT")
     )
+
+    result = (
+        all_dates
+        .merge(cash_amount, on="DATE", how="left")
+        .merge(upi_amount, on="DATE", how="left")
+        .merge(credit_amount, on="DATE", how="left")
+        .merge(credit_count, on="DATE", how="left")
+        .merge(transaction_count, on="DATE", how="left")
+        .fillna(0)
+        .sort_values("DATE", ascending=True)
+    )
+
+    result["DATE"] = result["DATE"].dt.date
 
     for col in ["CASH AMOUNT", "UPI AMOUNT", "CREDIT AMOUNT"]:
         result[col] = result[col].apply(
@@ -294,6 +321,7 @@ def get_payment_received_per_month(sheet_name, monthly_sheets_filtered):
         )
 
     result["CREDIT COUNT"] = result["CREDIT COUNT"].astype(int)
+    result["TRANSACTION COUNT"] = result["TRANSACTION COUNT"].astype(int)
 
     return result
 
@@ -430,22 +458,24 @@ if st.session_state.confirmed_month and st.session_state.confirmed_report:
         if result is None:
             st.warning("Required columns were not found for this report.")
         elif result.empty:
-            st.info("No sender-wise payment data found.")
+            st.info("No date-wise payment data found.")
         else:
             total_cash = result["CASH AMOUNT"].sum()
             total_upi = result["UPI AMOUNT"].sum()
             total_credit_amount = result["CREDIT AMOUNT"].sum()
             total_credit_count = int(result["CREDIT COUNT"].sum())
+            total_transaction_count = int(result["TRANSACTION COUNT"].sum())
 
-            col1, col2, col3, col4 = st.columns(4)
+            col1, col2, col3, col4, col5 = st.columns(5)
             col1.metric("Total Cash", total_cash)
             col2.metric("Total UPI", total_upi)
             col3.metric("Total Credit", total_credit_amount)
             col4.metric("Credit Count", total_credit_count)
+            col5.metric("Transaction Count", total_transaction_count)
 
             st.dataframe(
-                prepare_display_table(result),
+                prepare_display_table(result, left_align_payment_columns=True),
                 use_container_width=True,
                 hide_index=True,
-                column_config=get_table_column_config(),
+                column_config=get_table_column_config(left_align_payment_columns=True),
             )

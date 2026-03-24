@@ -508,6 +508,7 @@ if st.session_state.confirmed_month and st.session_state.confirmed_report:
         if result.empty:
             st.warning("Required columns were not found for this report.")
         else:
+            st.metric("Total Packets Booked This Month", int(result["Packet Count"].sum()))
             sender_date_result = get_sender_wise_packets_for_each_date(month_name, monthly_sheets_filtered)
             display_result = prepare_display_table(result, left_align_packet_count=True)
             event = st.dataframe(

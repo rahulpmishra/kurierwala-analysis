@@ -224,7 +224,7 @@ def get_packets_booked_per_mode(sheet_name, monthly_sheets_filtered):
     )
 
 
-def get_payment_received_per_month(sheet_name, monthly_sheets_filtered):
+def get_payment_base_df(sheet_name, monthly_sheets_filtered):
     df = monthly_sheets_filtered[sheet_name].copy()
 
     df.columns = df.columns.astype(str).str.strip().str.upper()
@@ -247,6 +247,17 @@ def get_payment_received_per_month(sheet_name, monthly_sheets_filtered):
     df["CREDIT OR CASH"] = df["CREDIT OR CASH"].astype(str).str.upper().str.strip()
     df["AMOUNT"] = df["AMOUNT"].astype(str).str.strip()
     df["AMOUNT_NUM"] = pd.to_numeric(df["AMOUNT"], errors="coerce")
+    if "SENDER NAME" in df.columns:
+        df["SENDER NAME"] = df["SENDER NAME"].astype(str).str.strip()
+
+    return df
+
+
+def get_payment_received_per_month(sheet_name, monthly_sheets_filtered):
+    df = get_payment_base_df(sheet_name, monthly_sheets_filtered)
+
+    if df is None:
+        return None
 
     if df.empty:
         return pd.DataFrame(
@@ -314,6 +325,108 @@ def get_payment_received_per_month(sheet_name, monthly_sheets_filtered):
     )
 
     result["DATE"] = result["DATE"].dt.date
+
+    for col in ["CASH AMOUNT", "UPI AMOUNT", "CREDIT AMOUNT"]:
+        result[col] = result[col].apply(
+            lambda value: int(value) if float(value).is_integer() else round(float(value), 2)
+        )
+
+    result["CREDIT COUNT"] = result["CREDIT COUNT"].astype(int)
+    result["TRANSACTION COUNT"] = result["TRANSACTION COUNT"].astype(int)
+
+    return result
+
+
+def get_sender_wise_payment_for_date(sheet_name, monthly_sheets_filtered, selected_date):
+    df = get_payment_base_df(sheet_name, monthly_sheets_filtered)
+
+    if df is None or "SENDER NAME" not in df.columns:
+        return None
+
+    df = df[
+        (df["SENDER NAME"] != "") &
+        (df["SENDER NAME"].str.lower() != "nan")
+    ]
+
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "SENDER NAME",
+                "CASH AMOUNT",
+                "UPI AMOUNT",
+                "CREDIT AMOUNT",
+                "CREDIT COUNT",
+                "TRANSACTION COUNT",
+            ]
+        )
+
+    selected_date = pd.to_datetime(selected_date).normalize()
+    df = df[df["DATE"] == selected_date]
+
+    if df.empty:
+        return pd.DataFrame(
+            columns=[
+                "SENDER NAME",
+                "CASH AMOUNT",
+                "UPI AMOUNT",
+                "CREDIT AMOUNT",
+                "CREDIT COUNT",
+                "TRANSACTION COUNT",
+            ]
+        )
+
+    all_senders = pd.DataFrame({
+        "SENDER NAME": sorted(df["SENDER NAME"].unique())
+    })
+
+    cash_amount = (
+        df[df["CREDIT OR CASH"] == "CASH"]
+        .groupby("SENDER NAME")["AMOUNT_NUM"]
+        .sum()
+        .reset_index(name="CASH AMOUNT")
+    )
+
+    upi_amount = (
+        df[df["CREDIT OR CASH"] == "UPI"]
+        .groupby("SENDER NAME")["AMOUNT_NUM"]
+        .sum()
+        .reset_index(name="UPI AMOUNT")
+    )
+
+    credit_amount = (
+        df[df["CREDIT OR CASH"] == "CREDIT"]
+        .groupby("SENDER NAME")["AMOUNT_NUM"]
+        .sum()
+        .reset_index(name="CREDIT AMOUNT")
+    )
+
+    credit_count = (
+        df[
+            (df["CREDIT OR CASH"] == "CREDIT") &
+            (df["AMOUNT"].str.lower() == "monthly")
+        ]
+        .groupby("SENDER NAME")["AMOUNT"]
+        .count()
+        .reset_index(name="CREDIT COUNT")
+    )
+
+    transaction_count = (
+        df[df["CREDIT OR CASH"].isin(["CASH", "UPI", "CREDIT"])]
+        .groupby("SENDER NAME")["CREDIT OR CASH"]
+        .count()
+        .reset_index(name="TRANSACTION COUNT")
+    )
+
+    result = (
+        all_senders
+        .merge(cash_amount, on="SENDER NAME", how="left")
+        .merge(upi_amount, on="SENDER NAME", how="left")
+        .merge(credit_amount, on="SENDER NAME", how="left")
+        .merge(credit_count, on="SENDER NAME", how="left")
+        .merge(transaction_count, on="SENDER NAME", how="left")
+        .fillna(0)
+        .sort_values("SENDER NAME", ascending=True)
+    )
 
     for col in ["CASH AMOUNT", "UPI AMOUNT", "CREDIT AMOUNT"]:
         result[col] = result[col].apply(
@@ -473,9 +586,37 @@ if st.session_state.confirmed_month and st.session_state.confirmed_report:
             col4.metric("Credit Count", total_credit_count)
             col5.metric("Transaction Count", total_transaction_count)
 
-            st.dataframe(
+            event = st.dataframe(
                 prepare_display_table(result, left_align_payment_columns=True),
                 use_container_width=True,
                 hide_index=True,
                 column_config=get_table_column_config(left_align_payment_columns=True),
+                on_select="rerun",
+                selection_mode="single-row",
+                key="payment_date_table",
             )
+
+            selected_rows = event.selection.rows
+            if selected_rows:
+                selected_row = result.iloc[selected_rows[0]]
+                selected_date = selected_row["DATE"]
+                sender_result = get_sender_wise_payment_for_date(
+                    month_name,
+                    monthly_sheets_filtered,
+                    selected_date,
+                )
+
+                if sender_result is None:
+                    st.warning("SENDER NAME column was not found for the selected day's breakdown.")
+                elif sender_result.empty:
+                    st.info("No sender-wise payment data found for the selected date.")
+                else:
+                    st.write(f"Sender-wise payment details for {selected_date}")
+                    st.dataframe(
+                        prepare_display_table(sender_result, left_align_payment_columns=True),
+                        use_container_width=True,
+                        hide_index=True,
+                        column_config=get_table_column_config(left_align_payment_columns=True),
+                    )
+            else:
+                st.caption("Click a date row in the table to see sender-wise payment details for that day.")

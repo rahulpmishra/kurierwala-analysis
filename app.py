@@ -628,7 +628,6 @@ if st.button("Analyze", key="source_analyze"):
             )
             if uploaded_file is None and excel_url.strip():
                 save_recent_source(st.session_state.spreadsheet_name, excel_url)
-                st.session_state.recent_source_url = excel_url.strip()
             st.success("File analyzed. Select a month below.")
     except Exception as exc:
         st.session_state.monthly_sheets_filtered = None

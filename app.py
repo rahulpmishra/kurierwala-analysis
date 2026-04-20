@@ -1,4 +1,5 @@
 import io
+import json
 import re
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -12,6 +13,10 @@ from openpyxl import load_workbook
 st.set_page_config(page_title="Kurier Analysis", layout="centered")
 
 st.title("Kurier Analysis")
+
+
+RECENT_SOURCES_PATH = Path(__file__).with_name("recent_sources.json")
+MAX_RECENT_SOURCES = 3
 
 
 month_map = {
@@ -143,6 +148,59 @@ def get_spreadsheet_display_name(excel_url, uploaded_file, workbook_title=None):
     parsed_url = urlparse(source)
     file_name = unquote(parsed_url.path.rstrip("/").split("/")[-1])
     return Path(file_name).stem if file_name else source
+
+
+def load_recent_sources():
+    if not RECENT_SOURCES_PATH.exists():
+        return []
+
+    try:
+        saved_sources = json.loads(RECENT_SOURCES_PATH.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+
+    if not isinstance(saved_sources, list):
+        return []
+
+    recent_sources = []
+    for entry in saved_sources:
+        if not isinstance(entry, dict):
+            continue
+
+        url = str(entry.get("url", "")).strip()
+        name = str(entry.get("name", "")).strip()
+
+        if not url:
+            continue
+
+        recent_sources.append({
+            "name": name or get_spreadsheet_display_name(url, None),
+            "url": url,
+        })
+
+    return recent_sources[:MAX_RECENT_SOURCES]
+
+
+def save_recent_source(name, url):
+    cleaned_url = (url or "").strip()
+    if not cleaned_url:
+        return
+
+    cleaned_name = (name or "").strip() or get_spreadsheet_display_name(cleaned_url, None)
+    recent_sources = [
+        entry for entry in load_recent_sources()
+        if entry.get("url", "").strip() != cleaned_url
+    ]
+
+    recent_sources.insert(0, {
+        "name": cleaned_name,
+        "url": cleaned_url,
+    })
+
+    RECENT_SOURCES_PATH.write_text(
+        json.dumps(recent_sources[:MAX_RECENT_SOURCES], indent=2),
+        encoding="utf-8",
+    )
 
 
 def add_serial_number(df):
@@ -505,6 +563,12 @@ def get_sender_wise_payment_for_date(sheet_name, monthly_sheets_filtered, select
     return result
 
 
+def apply_recent_source_selection():
+    selected_recent_url = st.session_state.recent_source_url
+    if selected_recent_url:
+        st.session_state.excel_url_input = selected_recent_url
+
+
 if "monthly_sheets_filtered" not in st.session_state:
     st.session_state.monthly_sheets_filtered = None
 
@@ -517,8 +581,29 @@ if "confirmed_report" not in st.session_state:
 if "spreadsheet_name" not in st.session_state:
     st.session_state.spreadsheet_name = None
 
+if "excel_url_input" not in st.session_state:
+    st.session_state.excel_url_input = ""
 
-excel_url = st.text_input("Paste Google Sheet / Excel URL")
+if "recent_source_url" not in st.session_state:
+    st.session_state.recent_source_url = ""
+
+
+recent_sources = load_recent_sources()
+if recent_sources:
+    recent_source_names = {
+        entry["url"]: entry["name"] for entry in recent_sources
+    }
+    st.selectbox(
+        "Saved Recent Sheets",
+        options=[""] + [entry["url"] for entry in recent_sources],
+        format_func=lambda url: "Select saved sheet" if not url else recent_source_names.get(url, url),
+        key="recent_source_url",
+        on_change=apply_recent_source_selection,
+    )
+    st.caption("The latest 3 working URLs are saved automatically.")
+
+
+excel_url = st.text_input("Paste Google Sheet / Excel URL", key="excel_url_input")
 uploaded_file = st.file_uploader("Or upload Excel file", type=["xlsx", "xls"])
 
 if st.button("Analyze", key="source_analyze"):
@@ -541,6 +626,9 @@ if st.button("Analyze", key="source_analyze"):
                 uploaded_file,
                 workbook_title=workbook_title,
             )
+            if uploaded_file is None and excel_url.strip():
+                save_recent_source(st.session_state.spreadsheet_name, excel_url)
+                st.session_state.recent_source_url = excel_url.strip()
             st.success("File analyzed. Select a month below.")
     except Exception as exc:
         st.session_state.monthly_sheets_filtered = None
